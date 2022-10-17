@@ -5,6 +5,7 @@ This script trains MLPs on multiple sparse parity problems at once.
 
 Comments
     - infinite data
+    - doesn't actually do sampling. the proportion of each batch that each subtask takes up is constant
 """
 
 from collections import defaultdict
@@ -14,7 +15,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-import scipy.stats
+# import scipy.stats
 from tqdm.auto import tqdm
 
 import torch
@@ -167,45 +168,41 @@ def run(n_tasks,
 
     Ss = [random.sample(range(n), k) for _ in range(n_tasks)]
     ex.info['Ss'] = Ss
+
+    Z = np.sum(np.power(np.arange(1, n_tasks+1, 1, dtype=np.float64), -alpha))
+    probs = np.power(np.arange(1, n_tasks+1, 1, dtype=np.float64), -alpha) / Z
+
+    batch_sizes = [int(prob * batch_size) for prob in probs]
+    test_batch_sizes = [int(prob * test_points) for prob in probs]
+    _log.debug(f"Total batch size = {sum(batch_sizes)}")
     
     loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(mlp.parameters(), lr=lr)
     ex.info['log_steps'] = list()
     ex.info['accuracies'] = list()
     ex.info['losses'] = list()
-    ex.info['losses_subtasks'] = defaultdict(list)
-    ex.info['accuracies_subtasks'] = defaultdict(list)
+    ex.info['losses_subtasks'] = dict()
+    ex.info['accuracies_subtasks'] = dict()
+    for i in range(n_tasks):
+        ex.info['losses_subtasks'][str(i)] = list()
+        ex.info['accuracies_subtasks'][str(i)] = list()
     for step in tqdm(range(steps), disable=not verbose):
         if step % log_freq == 0:
             with torch.no_grad():
-                samples = scipy.stats.zipfian.rvs(alpha, n_tasks, size=test_points)
-                hist = hist = defaultdict(int)
-                for s in samples:
-                    hist[s] += 1
-                codes = list(hist.keys())
-                sizes = [hist[c] for c in codes]
-                batch_Ss = [Ss[c] for c in codes]
-                x_i, y_i = get_batch(n_tasks=n_tasks, n=n, Ss=batch_Ss, codes=codes, sizes=sizes, device=device, dtype=dtype)
+                x_i, y_i = get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=test_batch_sizes, device=device, dtype=dtype)
                 y_i_pred = mlp(x_i)
                 labels_i_pred = torch.argmax(y_i_pred, dim=1)
                 ex.info['accuracies'].append(torch.sum(labels_i_pred == y_i).item() / test_points) 
-                ex.info['losses'].append(loss.item())
+                ex.info['losses'].append(loss_fn(y_i_pred, y_i).item())
                 for i in range(n_tasks):
                     x_i, y_i = get_batch(n_tasks=n_tasks, n=n, Ss=[Ss[i]], codes=[i], sizes=[test_points_per_task], device=device)
                     y_i_pred = mlp(x_i)
-                    ex.info['losses_subtasks'][i].append(loss_fn(y_i_pred, y_i).item())
+                    ex.info['losses_subtasks'][str(i)].append(loss_fn(y_i_pred, y_i).item())
                     labels_i_pred = torch.argmax(y_i_pred, dim=1)
-                    ex.info['accuracies_subtasks'][i].append(torch.sum(labels_i_pred == y_i).item() / test_points_per_task)
-
+                    ex.info['accuracies_subtasks'][str(i)].append(torch.sum(labels_i_pred == y_i).item() / test_points_per_task)
+                ex.info['log_steps'].append(step)
         optimizer.zero_grad()
-        samples = scipy.stats.zipfian.rvs(alpha, n_tasks, size=batch_size)
-        hist = hist = defaultdict(int)
-        for s in samples:
-            hist[s] += 1
-        codes = list(hist.keys())
-        sizes = [hist[c] for c in codes]
-        batch_Ss = [Ss[c] for c in codes]
-        x, y_target = get_batch(n_tasks=n_tasks, n=n, Ss=batch_Ss, codes=codes, sizes=sizes, device=device, dtype=dtype)
+        x, y_target = get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=batch_sizes, device=device, dtype=dtype)
         y_pred = mlp(x)
         loss = loss_fn(y_pred, y_target)
         loss.backward()
