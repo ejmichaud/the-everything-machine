@@ -23,7 +23,7 @@ import torch.nn as nn
 
 from sacred import Experiment
 from sacred.utils import apply_backspaces_and_linefeeds
-ex = Experiment("sparse-parity-v1")
+ex = Experiment("sparse-parity-v2")
 ex.captured_out_filter = apply_backspaces_and_linefeeds
 
 
@@ -70,6 +70,10 @@ def get_batch(n_tasks, n, Ss, codes, sizes, device='cpu', dtype=torch.float64):
             start_i += size
     return batch_x.to(dtype), batch_y
     
+def cycle(iterable):
+    while True:
+        for x in iterable:
+            yield x
 
 # --------------------------
 #    ,-------------.
@@ -88,6 +92,8 @@ def cfg():
     n = 50
     k = 3
     alpha = 1.5
+
+    D = -1 # -1 for infinite data
 
     width = 100
     depth = 2
@@ -118,6 +124,7 @@ def run(n_tasks,
         n,
         k,
         alpha,
+        D,
         width,
         depth,
         activation,
@@ -164,7 +171,7 @@ def run(n_tasks,
     _log.debug(f"Model has {sum(t.numel() for t in mlp.parameters())} parameters") 
     
     ex.info['P'] = sum(t.numel() for t in mlp.parameters())
-    ex.info['D'] = steps * batch_size
+    ex.info['D'] = steps * batch_size if D == -1 else D
 
     Ss = [random.sample(range(n), k) for _ in range(n_tasks)]
     ex.info['Ss'] = Ss
@@ -175,7 +182,14 @@ def run(n_tasks,
     batch_sizes = [int(prob * batch_size) for prob in probs]
     test_batch_sizes = [int(prob * test_points) for prob in probs]
     _log.debug(f"Total batch size = {sum(batch_sizes)}")
-    
+
+    if D != -1:
+        train_set_sizes = [int(prob * D) for prob in probs]
+        train_x, train_y = get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=train_set_sizes, device='cpu', dtype=dtype)
+        train_data = torch.utils.data.TensorDataset(train_x, train_y)
+        train_loader = torch.utils.data.DataLoader(train_data, batch_size=min(D, batch_size), shuffle=True)
+        train_iter = cycle(train_loader)
+
     loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(mlp.parameters(), lr=lr)
     ex.info['log_steps'] = list()
@@ -202,7 +216,12 @@ def run(n_tasks,
                     ex.info['accuracies_subtasks'][str(i)].append(torch.sum(labels_i_pred == y_i).item() / test_points_per_task)
                 ex.info['log_steps'].append(step)
         optimizer.zero_grad()
-        x, y_target = get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=batch_sizes, device=device, dtype=dtype)
+        if D == -1:
+            x, y_target = get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=batch_sizes, device=device, dtype=dtype)
+        else:
+            x, y_target = next(train_iter)
+            x = x.to(device)
+            y_target = y_target.to(device)
         y_pred = mlp(x)
         loss = loss_fn(y_pred, y_target)
         loss.backward()
