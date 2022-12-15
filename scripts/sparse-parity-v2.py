@@ -106,7 +106,7 @@ def cfg():
     test_points_per_task = 1000
     
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    dtype = torch.float64
+    dtype = torch.float32
 
     log_freq = max(1, steps // 1000)
     verbose=False

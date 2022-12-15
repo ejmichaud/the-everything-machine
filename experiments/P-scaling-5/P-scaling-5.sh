@@ -7,7 +7,7 @@
 #SBATCH --error=/om/user/ericjm/results/the-everything-machine/P-scaling-5/logs/slurm-%A_%a.err
 #SBATCH --mem=8G
 #SBATCH --constraint=6GB
-#SBATCH --array=0-29
+#SBATCH --array=0-59
 
 python /om2/user/ericjm/the-everything-machine/experiments/P-scaling-5/P-scaling-5-config.py $SLURM_ARRAY_TASK_ID
 
