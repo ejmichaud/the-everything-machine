@@ -4,8 +4,9 @@
 This script trains MLPs on multiple sparse parity problems at once.
 
 Comments
-    - infinite data
-    - doesn't actually do sampling. the proportion of each batch that each subtask takes up is constant
+    - Ways that it doesn't actually do sampling:
+        (1) In the infinite data regime, frequencies within a batch are given exactly by the power law, not via sampling
+        (2) In the finite data regime, the frequencies within the train set are given exactly by a power law, not via sampling
 """
 
 from collections import defaultdict
@@ -23,7 +24,7 @@ import torch.nn as nn
 
 from sacred import Experiment
 from sacred.utils import apply_backspaces_and_linefeeds
-ex = Experiment("sparse-parity-v2")
+ex = Experiment("sparse-parity-v3")
 ex.captured_out_filter = apply_backspaces_and_linefeeds
 
 
@@ -169,11 +170,16 @@ def run(n_tasks,
     mlp = nn.Sequential(*layers).to(device)
     _log.debug("Created model.")
     _log.debug(f"Model has {sum(t.numel() for t in mlp.parameters())} parameters") 
-    
     ex.info['P'] = sum(t.numel() for t in mlp.parameters())
-    ex.info['D'] = steps * batch_size if D == -1 else D
 
-    Ss = [random.sample(range(n), k) for _ in range(n_tasks)]
+    Ss = []
+    for _ in range(n_tasks * 10):
+        S = tuple(sorted(list(random.sample(range(n), k))))
+        if S not in Ss:
+            Ss.append(S)
+        if len(Ss) == n_tasks:
+            break
+    assert len(Ss) == n_tasks, "Couldn't find enough subsets for tasks for the given n, k"
     ex.info['Ss'] = Ss
 
     Z = np.sum(np.power(np.arange(1, n_tasks+1, 1, dtype=np.float64), -alpha))
@@ -189,6 +195,9 @@ def run(n_tasks,
         train_data = torch.utils.data.TensorDataset(train_x, train_y)
         train_loader = torch.utils.data.DataLoader(train_data, batch_size=min(D, batch_size), shuffle=True)
         train_iter = cycle(train_loader)
+        ex.info['D'] = len(train_data)
+    else:
+        ex.info['D'] = steps * batch_size
 
     loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(mlp.parameters(), lr=lr)

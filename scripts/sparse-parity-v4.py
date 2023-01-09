@@ -4,8 +4,7 @@
 This script trains MLPs on multiple sparse parity problems at once.
 
 Comments
-    - infinite data
-    - doesn't actually do sampling. the proportion of each batch that each subtask takes up is constant
+    - now does sampling for everything except the test batch -- frequencies of subtasks are exactly distributed within test batch
 """
 
 from collections import defaultdict
@@ -23,7 +22,7 @@ import torch.nn as nn
 
 from sacred import Experiment
 from sacred.utils import apply_backspaces_and_linefeeds
-ex = Experiment("sparse-parity-v2")
+ex = Experiment("sparse-parity-v4")
 ex.captured_out_filter = apply_backspaces_and_linefeeds
 
 
@@ -169,26 +168,35 @@ def run(n_tasks,
     mlp = nn.Sequential(*layers).to(device)
     _log.debug("Created model.")
     _log.debug(f"Model has {sum(t.numel() for t in mlp.parameters())} parameters") 
-    
     ex.info['P'] = sum(t.numel() for t in mlp.parameters())
-    ex.info['D'] = steps * batch_size if D == -1 else D
 
-    Ss = [random.sample(range(n), k) for _ in range(n_tasks)]
+    Ss = []
+    for _ in range(n_tasks * 10):
+        S = tuple(sorted(list(random.sample(range(n), k))))
+        if S not in Ss:
+            Ss.append(S)
+        if len(Ss) == n_tasks:
+            break
+    assert len(Ss) == n_tasks, "Couldn't find enough subsets for tasks for the given n, k"
     ex.info['Ss'] = Ss
 
-    Z = np.sum(np.power(np.arange(1, n_tasks+1, 1, dtype=np.float64), -alpha))
-    probs = np.power(np.arange(1, n_tasks+1, 1, dtype=np.float64), -alpha) / Z
+    probs = np.array([np.power(n, -alpha) for n in range(1, n_tasks+1)])
+    probs = probs / np.sum(probs)
+    cdf = np.cumsum(probs)
 
-    batch_sizes = [int(prob * batch_size) for prob in probs]
     test_batch_sizes = [int(prob * test_points) for prob in probs]
-    _log.debug(f"Total batch size = {sum(batch_sizes)}")
+    # _log.debug(f"Total batch size = {sum(batch_sizes)}")
 
     if D != -1:
-        train_set_sizes = [int(prob * D) for prob in probs]
-        train_x, train_y = get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=train_set_sizes, device='cpu', dtype=dtype)
+        samples = np.searchsorted(cdf, np.random.rand(D,))
+        hist, _ = np.histogram(samples, bins=n_tasks, range=(0, n_tasks-1))
+        train_x, train_y = get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=hist, device='cpu', dtype=dtype)
         train_data = torch.utils.data.TensorDataset(train_x, train_y)
         train_loader = torch.utils.data.DataLoader(train_data, batch_size=min(D, batch_size), shuffle=True)
         train_iter = cycle(train_loader)
+        ex.info['D'] = len(train_data)
+    else:
+        ex.info['D'] = steps * batch_size
 
     loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(mlp.parameters(), lr=lr)
@@ -217,7 +225,9 @@ def run(n_tasks,
                 ex.info['log_steps'].append(step)
         optimizer.zero_grad()
         if D == -1:
-            x, y_target = get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=batch_sizes, device=device, dtype=dtype)
+            samples = np.searchsorted(cdf, np.random.rand(batch_size,))
+            hist, _ = np.histogram(samples, bins=n_tasks, range=(0, n_tasks-1))
+            x, y_target = get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=hist, device=device, dtype=dtype)
         else:
             x, y_target = next(train_iter)
             x = x.to(device)
