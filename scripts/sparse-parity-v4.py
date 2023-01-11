@@ -25,8 +25,60 @@ from sacred.utils import apply_backspaces_and_linefeeds
 ex = Experiment("sparse-parity-v4")
 ex.captured_out_filter = apply_backspaces_and_linefeeds
 
+class FastTensorDataLoader:
+    """
+    A DataLoader-like object for a set of tensors that can be much faster than
+    TensorDataset + DataLoader because dataloader grabs individual indices of
+    the dataset and calls cat (slow).
+    """
+    def __init__(self, *tensors, batch_size=32, shuffle=False):
+        """
+        Initialize a FastTensorDataLoader.
 
-def get_batch(n_tasks, n, Ss, codes, sizes, device='cpu', dtype=torch.float64):
+        :param *tensors: tensors to store. Must have the same length @ dim 0.
+        :param batch_size: batch size to load.
+        :param shuffle: if True, shuffle the data *in-place* whenever an
+            iterator is created out of this object.
+
+        :returns: A FastTensorDataLoader.
+        """
+        assert all(t.shape[0] == tensors[0].shape[0] for t in tensors)
+        self.tensors = tensors
+
+        self.dataset_len = self.tensors[0].shape[0]
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+        # Calculate # batches
+        n_batches, remainder = divmod(self.dataset_len, self.batch_size)
+        if remainder > 0:
+            n_batches += 1
+        self.n_batches = n_batches
+
+    def __iter__(self):
+        if self.shuffle:
+            self.indices = torch.randperm(self.dataset_len, device=self.tensors[0].device)
+        else:
+            self.indices = None
+        self.i = 0
+        return self
+
+    def __next__(self):
+        if self.i >= self.dataset_len:
+            raise StopIteration
+        if self.indices is not None:
+            indices = self.indices[self.i:self.i+self.batch_size]
+            batch = tuple(torch.index_select(t, 0, indices) for t in self.tensors)
+        else:
+            batch = tuple(t[self.i:self.i+self.batch_size] for t in self.tensors)
+        self.i += self.batch_size
+        return batch
+
+    def __len__(self):
+        return self.n_batches
+
+
+def get_batch(n_tasks, n, Ss, codes, sizes, device='cpu', dtype=torch.float32):
     """Creates batch. 
 
     Parameters
@@ -53,21 +105,20 @@ def get_batch(n_tasks, n, Ss, codes, sizes, device='cpu', dtype=torch.float64):
     y : torch.Tensor
         labels
     """
-    batch_x = torch.zeros((sum(sizes), n_tasks+n), device=device)
+    batch_x = torch.zeros((sum(sizes), n_tasks+n), dtype=dtype, device=device)
     batch_y = torch.zeros((sum(sizes),), dtype=torch.int64, device=device)
     start_i = 0
     for (S, size, code) in zip(Ss, sizes, codes):
         if size > 0:
-            x = torch.randint(low=0, high=2, size=(size, n), device=device)
+            x = torch.randint(low=0, high=2, size=(size, n), dtype=dtype, device=device)
             y = torch.sum(x[:, S], dim=1) % 2
-            x_task_code = torch.zeros((size, n_tasks), device=device)
+            x_task_code = torch.zeros((size, n_tasks), dtype=dtype, device=device)
             x_task_code[:, code] = 1
             x = torch.cat([x_task_code, x], dim=1)
-            x = x.to(torch.float64)
             batch_x[start_i:start_i+size, :] = x
             batch_y[start_i:start_i+size] = y
             start_i += size
-    return batch_x.to(dtype), batch_y
+    return batch_x, batch_y
     
 def cycle(iterable):
     while True:
@@ -191,10 +242,11 @@ def run(n_tasks,
         samples = np.searchsorted(cdf, np.random.rand(D,))
         hist, _ = np.histogram(samples, bins=n_tasks, range=(0, n_tasks-1))
         train_x, train_y = get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=hist, device='cpu', dtype=dtype)
-        train_data = torch.utils.data.TensorDataset(train_x, train_y)
-        train_loader = torch.utils.data.DataLoader(train_data, batch_size=min(D, batch_size), shuffle=True)
+        train_x = train_x.to(device)
+        train_y = train_y.to(device)
+        train_loader = FastTensorDataLoader(train_x, train_y, batch_size=min(D, batch_size), shuffle=True)
         train_iter = cycle(train_loader)
-        ex.info['D'] = len(train_data)
+        ex.info['D'] = D
     else:
         ex.info['D'] = steps * batch_size
 
@@ -230,8 +282,6 @@ def run(n_tasks,
             x, y_target = get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=hist, device=device, dtype=dtype)
         else:
             x, y_target = next(train_iter)
-            x = x.to(device)
-            y_target = y_target.to(device)
         y_pred = mlp(x)
         loss = loss_fn(y_pred, y_target)
         loss.backward()
