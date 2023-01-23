@@ -142,6 +142,7 @@ def cfg():
     n = 50
     k = 3
     alpha = 1.5
+    offset = 0
 
     D = -1 # -1 for infinite data
 
@@ -174,6 +175,7 @@ def run(n_tasks,
         n,
         k,
         alpha,
+        offset,
         D,
         width,
         depth,
@@ -231,7 +233,7 @@ def run(n_tasks,
     assert len(Ss) == n_tasks, "Couldn't find enough subsets for tasks for the given n, k"
     ex.info['Ss'] = Ss
 
-    probs = np.array([np.power(n, -alpha) for n in range(1, n_tasks+1)])
+    probs = np.array([np.power(n, -alpha) for n in range(1+offset, n_tasks+offset+1)])
     probs = probs / np.sum(probs)
     cdf = np.cumsum(probs)
 

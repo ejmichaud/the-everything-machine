@@ -11,7 +11,7 @@ model_names = [
     "pythia-1.3b",
     "pythia-2.7b",
     "pythia-6.7b",
-    # "pythia-13b"
+    "pythia-13b"
 ]
 
 model_names_deduped = [
