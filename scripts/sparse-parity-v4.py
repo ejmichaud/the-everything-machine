@@ -153,6 +153,7 @@ def cfg():
     steps = 25000
     batch_size = 10000
     lr = 1e-3
+    weight_decay = 0.0
     test_points = 30000
     test_points_per_task = 1000
     
@@ -185,6 +186,7 @@ def run(n_tasks,
         steps,
         batch_size,
         lr,
+        weight_decay,
         device,
         dtype,
         log_freq,
@@ -253,7 +255,7 @@ def run(n_tasks,
         ex.info['D'] = steps * batch_size
 
     loss_fn = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(mlp.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(mlp.parameters(), lr=lr, weight_decay=weight_decay)
     ex.info['log_steps'] = list()
     ex.info['accuracies'] = list()
     ex.info['losses'] = list()
